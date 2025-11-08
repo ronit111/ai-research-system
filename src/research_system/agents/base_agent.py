@@ -1,0 +1,154 @@
+"""Base agent class that all research agents inherit from."""
+
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Optional
+from datetime import datetime
+
+from anthropic import Anthropic
+from pydantic import BaseModel, Field
+
+from ..config.settings import settings
+
+
+class AgentInput(BaseModel):
+    """Structured input for an agent."""
+
+    task: str = Field(..., description="Task description for the agent")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Context from previous agents")
+    project_id: Optional[str] = Field(default=None, description="Research project ID")
+    domain: str = Field(default=settings.default_domain, description="Research domain")
+
+
+class AgentOutput(BaseModel):
+    """Structured output from an agent."""
+
+    success: bool = Field(..., description="Whether agent completed successfully")
+    results: Dict[str, Any] = Field(default_factory=dict, description="Agent results")
+    artifacts: list[str] = Field(default_factory=list, description="Paths to saved files")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata")
+    educational_notes: str = Field(default="", description="What the user should learn")
+    next_steps: list[str] = Field(default_factory=list, description="Recommended next actions")
+    tokens_used: int = Field(default=0, description="Total tokens used")
+    cost_usd: float = Field(default=0.0, description="Cost in USD")
+
+
+class BaseAgent(ABC):
+    """
+    Abstract base class for all research agents.
+
+    Each agent implements specific research functionality while sharing
+    common infrastructure for LLM calls, cost tracking, and storage.
+    """
+
+    def __init__(self, name: Optional[str] = None):
+        """
+        Initialize agent.
+
+        Args:
+            name: Agent name (defaults to class name)
+        """
+        self.name = name or self.__class__.__name__
+        self.client = Anthropic(api_key=settings.anthropic_api_key)
+        self.model = settings.model_name
+        self.max_tokens = settings.max_tokens
+
+    @abstractmethod
+    async def execute(self, input_data: AgentInput) -> AgentOutput:
+        """
+        Execute agent's main logic.
+
+        This method must be implemented by each agent.
+
+        Args:
+            input_data: Structured input for the agent
+
+        Returns:
+            AgentOutput with results and metadata
+        """
+        pass
+
+    def call_llm(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+    ) -> tuple[str, int, float]:
+        """
+        Call Claude API with token and cost tracking.
+
+        Args:
+            prompt: User prompt
+            system_prompt: Optional system prompt
+            max_tokens: Maximum tokens to generate (defaults to settings)
+
+        Returns:
+            Tuple of (response_text, tokens_used, cost_usd)
+        """
+        messages = [{"role": "user", "content": prompt}]
+
+        kwargs = {
+            "model": self.model,
+            "max_tokens": max_tokens or self.max_tokens,
+            "messages": messages,
+        }
+
+        if system_prompt:
+            kwargs["system"] = system_prompt
+
+        response = self.client.messages.create(**kwargs)
+
+        # Calculate cost (Claude Sonnet 4.5 pricing)
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        cost = (input_tokens * 3 + output_tokens * 15) / 1_000_000  # $3/MTok input, $15/MTok output
+
+        total_tokens = input_tokens + output_tokens
+
+        return response.content[0].text, total_tokens, cost
+
+    def log_execution(
+        self,
+        input_data: AgentInput,
+        output: AgentOutput,
+        duration_seconds: float
+    ) -> None:
+        """
+        Log agent execution for debugging and monitoring.
+
+        Args:
+            input_data: Agent input
+            output: Agent output
+            duration_seconds: Execution time
+        """
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "agent": self.name,
+            "task": input_data.task,
+            "success": output.success,
+            "duration_seconds": duration_seconds,
+            "tokens_used": output.tokens_used,
+            "cost_usd": output.cost_usd,
+        }
+
+        # TODO: Implement proper logging to database
+        print(f"[{self.name}] Completed in {duration_seconds:.2f}s | "
+              f"Tokens: {output.tokens_used} | Cost: ${output.cost_usd:.4f}")
+
+    def format_educational_note(self, content: str) -> str:
+        """
+        Format educational notes for user learning.
+
+        Args:
+            content: Educational content
+
+        Returns:
+            Formatted note with clear structure
+        """
+        return f"""
+## 📚 What You Should Know
+
+{content}
+
+---
+*This note was generated by {self.name} to help you understand the research process.*
+"""
