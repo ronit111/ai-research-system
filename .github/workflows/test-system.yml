@@ -1,0 +1,75 @@
+name: AI Research System Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        
+    - name: Create .env file from secrets
+      run: |
+        cat > .env << ENVEOF
+        ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+        OBSIDIAN_VAULT_PATH=/tmp/obsidian-vault
+        KG_CONTEXT=ai-research
+        MONTHLY_BUDGET=50.00
+        COST_ALERT_THRESHOLD=0.8
+        DEFAULT_MAX_PAPERS=5
+        DEFAULT_DOMAIN=machine_learning
+        ENVEOF
+        
+    - name: Create required directories
+      run: |
+        mkdir -p /tmp/obsidian-vault
+        mkdir -p data
+        
+    - name: Run Agent 1 Test (Literature Review)
+      run: |
+        python scripts/test_agent1.py
+      continue-on-error: true
+      
+    - name: Run Agent 1-2 Test (Ideas Generation)
+      run: |
+        python scripts/test_agent2.py
+      continue-on-error: true
+      
+    - name: Run Full 6-Agent End-to-End Test
+      run: |
+        python tests/test_end_to_end_workflow.py
+        
+    - name: Upload test artifacts
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results
+        path: |
+          data/
+          /tmp/obsidian-vault/
+        retention-days: 5
+        
+    - name: Display cost summary
+      if: always()
+      run: |
+        if [ -f data/costs.json ]; then
+          echo "=== Cost Summary ==="
+          cat data/costs.json | python -m json.tool
+        fi
